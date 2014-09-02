@@ -11,3 +11,4 @@
 gmon.out
 /mq_schema.ml
 /ocamlmq
+*.annot
