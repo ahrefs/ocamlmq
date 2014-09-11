@@ -18,4 +18,4 @@ let string_of_destination = function
 
 let destination_name = function
     Topic n | Queue n -> n
-  | Control n -> invalid_arg "Mq_types.destination_name"
+  | Control _n -> invalid_arg "Mq_types.destination_name"

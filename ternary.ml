@@ -5,8 +5,6 @@ type 'a t =
   | NV of char * 'a t * 'a t * 'a t (* no value *)
   | V of char * 'a t * 'a t * 'a t * 'a (* value *)
 
-type key = string
-
 let empty = E
 
 let rec length = function
@@ -28,9 +26,9 @@ let find k t =
           else begin match node with
               NV _ -> loop s (n + 1) maxn m
             | V (_, _, _, _, v) -> if n = maxn then v else loop s (n + 1) maxn m
-            | _ -> assert false
+            | E -> assert false
           end
-    | _ -> raise Not_found in 
+    | NV _ | V _ -> raise Not_found in 
   let len = String.length k in
     if len <> 0 then loop k 0 (len - 1) t
     else match t with
@@ -47,9 +45,9 @@ let find_prefixes k t =
           else begin match node with
               NV _ -> loop acc s (n + 1) maxn m
             | V (_, _, _, _, v) -> if n = maxn then (v :: acc) else loop (v :: acc) s (n + 1) maxn m
-            | _ -> assert false
+            | E -> assert false
           end
-    | _ -> acc in
+    | NV _ | V _ -> acc in
   let len = String.length k in
     if len <> 0 then loop [] k 0 (len - 1) t
     else match t with
@@ -81,7 +79,7 @@ let add k v t =
 
 let prune = function
     NV (_, E, E, E) -> E
-  | e -> e
+  | (E | NV _ | V _) as e -> e
 
 let remove k t =
   let rec del k off maxn = function

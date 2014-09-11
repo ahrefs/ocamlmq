@@ -118,7 +118,7 @@ let unack db msg_id =
 let check_sqlite_version_ok db =
   let v = select_one db sqlc"SELECT @s{sqlite_version()}" in
   let to_num s = Scanf.sscanf s "%d" (fun n -> n) in
-  let ns = List.map to_num (BatString.nsplit v ".") in
+  let ns = List.map to_num (BatString.nsplit v ~by:".") in
     if ns < [ 3; 6; 8 ] then
       failwith (sprintf "Need sqlite3 >= 3.6.8 (found: %s)" v)
 
@@ -216,6 +216,7 @@ let do_save_msg ?(can_flush = true) t sent msg =
   return ()
 
 let save_msg t ?low_priority msg =
+  ignore low_priority;
   Option.map_default (fun log -> Binlog.add log msg) (return ()) t.binlog >>
   do_save_msg t false msg
 
@@ -304,12 +305,10 @@ let unack_msg t msg_id =
   end;
   return ()
 
-exception Msg of message
-
 let get_msg_for_delivery t dest =
   try
     let unsent, want_ack = Hashtbl.find t.in_mem dest in
-    let ((prio, msg) as v) = MSET.min_elt unsent in
+    let ((_prio, msg) as v) = MSET.min_elt unsent in
       t.ack_pending <- SSET.add msg.msg_id t.ack_pending;
       Hashtbl.replace t.in_mem dest
         (MSET.remove v unsent, SSET.add msg.msg_id want_ack);
@@ -360,4 +359,4 @@ let crash_recovery t =
           Lwt_list.iter_s (do_save_msg ~can_flush:false t false) msgs
   end
 
-let init_db, check_db, auto_check_db = sql_check"sqlite"
+let init_db, _check_db, auto_check_db = sql_check"sqlite"

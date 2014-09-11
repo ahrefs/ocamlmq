@@ -75,7 +75,13 @@ struct
     | Array a -> Array.fold_right S.add a S.empty
     | Set s -> s
 
-  let union t1 t2 = match t1, t2 with
-      Empty, t | t, Empty -> t
-    | _ -> Set (S.union (to_set t1) (to_set t2))
+  let union t1 t2 =
+    if t1 = Empty
+    then
+      t2
+    else if t2 = Empty
+    then
+      t1
+    else
+      Set (S.union (to_set t1) (to_set t2))
 end

@@ -6,7 +6,7 @@ USE_OCAMLFIND = true
 
 .SUBDIRS: ocaml-sqlexpr
 
-OCAMLFLAGS = -thread
+OCAMLFLAGS = -thread -w A
 OCAMLCFLAGS += -g -annot
 OCAMLFINDFLAGS += -syntax camlp4o
 OCAMLINCLUDES += ocaml-sqlexpr
@@ -36,6 +36,7 @@ OBJECTS[] =
 
 section
     OCAMLFINDFLAGS += -ppopt ocaml-sqlexpr/pa_sql.cmo
+    OCAMLFLAGS += -w -4-27-32
     .SCANNER: scan-ocaml-%.ml: %.ml ocaml-sqlexpr/pa_sql.cmo
     $(addsuffixes .cmi .cmx .cmo .o, mq_sqlite_persistence):
 

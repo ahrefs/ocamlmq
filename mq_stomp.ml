@@ -91,7 +91,7 @@ let read_stomp_headers ch =
     Lwt_io.read_line ch >>= function
         "" -> return acc
       | s ->
-          match (try Some (String.split s ":") with _ -> None) with
+          match (try Some (String.split s ~by:":") with _ -> None) with
               Some (k, v) -> loop ((String.lowercase k, String.strip v) :: acc)
             | None -> (* just ignore this line *) loop acc
   in loop []

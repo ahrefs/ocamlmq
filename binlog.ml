@@ -102,7 +102,13 @@ let copy src dst =
 let copy src dst =
   try_lwt
     copy src dst
-  with Unix.Unix_error (Unix.ENOENT, _, _) -> return []
+  with
+    Unix.Unix_error (ue, _, _) as e ->
+      if ue = Unix.ENOENT
+      then
+        return []
+      else
+        fail e
 
 let make ?(sync = false) file =
   let tmp = sprintf "%s.%d.%d" file (Unix.getpid ()) (Random.int 0x3FFFFFFF) in

@@ -165,11 +165,11 @@ let is_subs_blocked (conn, subs) =
 
 let select_unblocked_subs s = SUBS.filter (fun x -> not (is_subs_blocked x)) s
 
-let block_subscription listeners ((conn, subs) as c) =
+let block_subscription listeners ((_conn, _subs) as c) =
   listeners.l_ready <- SUBS.remove c listeners.l_ready;
   listeners.l_blocked <- SUBS.add c listeners.l_blocked
 
-let unblock_subscription listeners ((conn, subs) as c) =
+let unblock_subscription listeners ((_conn, _subs) as c) =
   listeners.l_ready <- SUBS.add c listeners.l_ready;
   listeners.l_blocked <- SUBS.remove c listeners.l_blocked
 
@@ -283,7 +283,7 @@ and enqueue_after_timeout broker ~queue ~msg_id =
                         msg_id (string_of_destination msg.msg_destination));
                 handle_send_msg_exn broker ~queue conn ~destination ~msg_id e
 
-let rec send_to_queue broker queue msg =
+let send_to_queue broker queue msg =
   match find_recipient broker queue with
       None -> return ()
     | Some (listeners, (conn, subs)) ->
@@ -376,13 +376,13 @@ let cmd_unsubscribe broker conn frame =
     send_error broker conn
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
-let cmd_disconnect broker conn frame =
+let cmd_disconnect broker conn _frame =
   DEBUG(show "Disconnect by %d." conn.conn_id);
   Lwt_io.abort conn.conn_och >>
   terminate_connection broker conn >>
   fail End_of_file
 
-let handle_control_message broker dst conn frame =
+let handle_control_message broker dst _conn _frame =
   if Str.string_match (Str.regexp "count-msgs/queue/") dst 0 then
     let queue = String.slice ~first:17 dst in
     lwt num_msgs = P.count_queue_msgs broker.b_msg_store queue in
@@ -461,7 +461,7 @@ let cmd_ack broker conn frame =
    with Not_found -> ());
   STOMP.handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
 
-let ignore_command broker conn frame = return ()
+let ignore_command _broker _conn _frame = return ()
 
 let command_handlers = H.create 13
 let register_command (name, f) = H.add command_handlers name f
@@ -510,15 +510,15 @@ let valid_credentials broker frame =
        true
   with Not_found | Exit -> false
 
-let rec establish_connection broker fd addr =
-  let ich = Lwt_io.of_fd Lwt_io.input fd in
-  let och = Lwt_io.of_fd Lwt_io.output fd in
+let rec establish_connection broker fd =
+  let ich = Lwt_io.of_fd ~mode:Lwt_io.input fd in
+  let och = Lwt_io.of_fd ~mode:Lwt_io.output fd in
     try_lwt
-      do_establish_connection broker addr ich och
+      do_establish_connection broker ich och
     finally
       Lwt_io.abort och
 
-and do_establish_connection broker addr ich och =
+and do_establish_connection broker ich och =
   lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol ich in
     match frame.STOMP.fr_command with
         "CONNECT" when not (valid_credentials broker frame) ->
@@ -586,9 +586,9 @@ let server_loop ?(debug = false) broker =
   let broker = { broker with b_debug = debug } in
   let rec loop () =
     (try_lwt
-      lwt (fd, addr) = Lwt_unix.accept broker.b_socket in
+      lwt (fd, _addr) = Lwt_unix.accept broker.b_socket in
         Lwt_unix.setsockopt fd Unix.TCP_NODELAY true;
-        ignore_result (establish_connection broker fd) addr;
+        ignore_result (establish_connection broker) fd;
         return ()
      with e ->
        eprintf "Got toplevel exception: %s\n%!" (Printexc.to_string e);

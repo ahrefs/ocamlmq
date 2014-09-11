@@ -1,6 +1,5 @@
 (* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
 open Printf
-open Lwt
 
 let set_some_string r = Arg.String (fun s -> r := Some s)
 let set_some_int r = Arg.Int (fun n -> r := Some n)
