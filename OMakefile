@@ -4,23 +4,22 @@ BYTE_ENABLED = true
 OCAMLOPTFLAGS = -inline 100
 USE_OCAMLFIND = true
 
-.SUBDIRS: ocaml-sqlexpr
-
 OCAMLFLAGS = -thread -w A
 OCAMLCFLAGS += -g -annot
-OCAMLINCLUDES += ocaml-sqlexpr
-OCAML_LIBS[] += ocaml-sqlexpr/sqlexpr
 
 OCAMLPACKS[] =
     csv
     lwt
     lwt.unix
     lwt.syntax
+    threads
     estring
     batteries
     unix
     str
     sqlite3
+    sqlexpr
+    sqlexpr.syntax
     camlp4.macro
     threads
     lwt_comm
@@ -41,9 +40,7 @@ OBJECTS[] =
     ternary
 
 section
-    OCAMLFINDFLAGS += -ppopt ocaml-sqlexpr/pa_sql.cmo
     OCAMLFLAGS += -w -4-27-32
-    .SCANNER: scan-ocaml-%.ml: %.ml ocaml-sqlexpr/pa_sql.cmo
     $(addsuffixes .cmi .cmx .cmo .o, mq_sqlite_persistence):
 
 OCamlLibrary(ocamlmq, $(OBJECTS))
