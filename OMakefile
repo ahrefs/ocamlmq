@@ -8,7 +8,6 @@ USE_OCAMLFIND = true
 
 OCAMLFLAGS = -thread -w A
 OCAMLCFLAGS += -g -annot
-OCAMLFINDFLAGS += -syntax camlp4o
 OCAMLINCLUDES += ocaml-sqlexpr
 OCAML_LIBS[] += ocaml-sqlexpr/sqlexpr
 
@@ -26,6 +25,12 @@ OCAMLPACKS[] =
     threads
     lwt_comm
 
+section
+    OCAML_LIBS[] += ocamlmq
+    OCamlProgram(ocamlmq, ocamlmq)
+
+OCAMLFINDFLAGS += -syntax camlp4o
+
 OBJECTS[] =
     binlog
     extSet
@@ -41,7 +46,7 @@ section
     .SCANNER: scan-ocaml-%.ml: %.ml ocaml-sqlexpr/pa_sql.cmo
     $(addsuffixes .cmi .cmx .cmo .o, mq_sqlite_persistence):
 
-OCamlProgram(ocamlmq, $(OBJECTS) ocamlmq)
+OCamlLibrary(ocamlmq, $(OBJECTS))
 
 section
     OCAMLPACKS[] += oUnit
@@ -49,7 +54,19 @@ section
     OCamlProgram(test, $(OBJECTS) $(TEST_FILES) test)
     $(addsuffixes .cmi .cmo .cmx .o, $(TEST_FILES) test):
 
-.DEFAULT: ocamlmq$(EXE)
+MQ_LIB = $(addsuffixes .cma .cmxa, ocamlmq)
+INSTALL_CMIS[] = $(addsuffix .cmi, $(OBJECTS))
+INSTALL_FILES[] = META $(INSTALL_CMIS) $(MQ_LIB)
+
+.DEFAULT: ocamlmq$(EXE) $(MQ_LIB)
+
+.PHONY: install
+install: META ocamlmq$(EXE) $(INSTALL_FILES)
+	ocamlfind install ocamlmq $(INSTALL_FILES)
+
+.PHONY: remove
+remove: META
+	ocamlfind remove ocamlmq
 
 .PHONY: clean
 

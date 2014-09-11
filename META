@@ -1,0 +1,4 @@
+version="git"
+requires="lwt lwt.unix lwt.syntax extlib unix camlp4.macro batteries str sqlite3 threads lwt_comm sqlexpr sqlexpr.syntax"
+archive(byte) = "ocamlmq.cma"
+archive(native) = "ocamlmq.cmxa"
