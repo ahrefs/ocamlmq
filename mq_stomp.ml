@@ -1,6 +1,5 @@
 (* Copyright (c) 2010 Mauricio Fernández <mfp@acm.org> *)
 open Mq_types
-open Printf
 open Lwt
 
 module String = BatString
@@ -58,17 +57,16 @@ let write_stomp_frame ~eol och frame =
            Lwt_io.flush och)
         och
 
-let handle_receipt ?(extra_headers=[]) ~eol och frame =
+let receipt ?(extra_headers=[]) frame =
   try
     let receipt = List.assoc "receipt" frame.fr_headers in
-      write_stomp_frame ~eol och
+    Some
         { fr_command = "RECEIPT";
           fr_headers = ("receipt-id", receipt) :: extra_headers;
           fr_body = "" }
-  with Not_found -> return ()
+  with Not_found -> None
 
-let send_message ~eol och msg =
-  write_stomp_frame ~eol och
+let message_frame msg =
     {
       fr_command = "MESSAGE";
       fr_headers = [
@@ -79,12 +77,8 @@ let send_message ~eol och msg =
       fr_body = msg.msg_body
     }
 
-let send_error ~eol och fmt =
-  ksprintf
-    (fun msg ->
-       write_stomp_frame ~eol och
-         { fr_command = "ERROR"; fr_headers = []; fr_body = msg; })
-    fmt
+let error_frame msg =
+  { fr_command = "ERROR"; fr_headers = []; fr_body = msg; }
 
 let read_stomp_headers ch =
   let rec loop acc =

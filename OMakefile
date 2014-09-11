@@ -24,6 +24,7 @@ OCAMLPACKS[] =
     sqlite3
     camlp4.macro
     threads
+    lwt_comm
 
 OBJECTS[] =
     binlog

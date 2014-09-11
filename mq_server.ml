@@ -41,8 +41,7 @@ let dummy_subscription = { qs_prefetch = 0; qs_pending_acks = 0 }
 
 type connection = {
   conn_id : int;
-  conn_ich : Lwt_io.input_channel;
-  conn_och : Lwt_io.output_channel;
+  conn : (STOMP.stomp_frame,STOMP.stomp_frame,[`Connect|`Bidi]) Lwt_comm.conn;
   mutable conn_pending_acks : (string, unit Lwt.u) H.t;
   conn_queues : (string, subscription) H.t;
   conn_topics : (string, unit) H.t; (* set of topics *)
@@ -71,7 +70,6 @@ type broker = {
   b_queues : (string, listeners) H.t;
   b_topics : (string, CONNS.t) H.t;
   mutable b_prefix_topics : CONNS.t TST.t;
-  b_socket : Lwt_unix.file_descr;
   b_frame_eol : bool;
   b_msg_store : P.t;
   b_force_async : bool;
@@ -136,8 +134,12 @@ let terminate_connection broker conn =
   List.iter (fun w -> try wakeup_exn w Lwt.Canceled with _ -> ()) wakeners;
   return ()
 
-let send_error broker conn fmt =
-  STOMP.send_error ~eol:broker.b_frame_eol conn.conn_och fmt
+let send_error conn fmt =
+  Printf.ksprintf
+    (fun msg ->
+       Lwt_comm.send conn.conn (STOMP.error_frame msg)
+    )
+    fmt
 
 let matching_conns broker topic =
   List.fold_left
@@ -151,8 +153,8 @@ let send_to_topic broker topic msg =
     CONNS.iter
       (fun conn ->
          DEBUG(show "Sending topic msg(%S) to %d" topic conn.conn_id);
-         ignore_result
-           (STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och) msg)
+         ignore_result (Lwt_comm.send conn.conn) msg
+      )
       (matching_conns broker topic);
     return ()
   end
@@ -209,7 +211,7 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
            P.register_ack_pending_msg broker.b_msg_store msg_id) in
     if not must_send then return () else
 
-    STOMP.send_message ~eol:broker.b_frame_eol conn.conn_och msg >>
+    lwt () = Lwt_comm.send conn.conn (STOMP.message_frame msg) in
     begin try_lwt
       match msg.msg_ack_timeout with
         dt when dt > 0. -> Lwt_unix.with_timeout dt (fun () -> sleep)
@@ -301,10 +303,13 @@ let new_msg_id =
 
 let new_conn_id = let n = ref 0 in fun () -> incr n; !n
 
-let cmd_subscribe broker conn frame =
-  let ret extra_headers =
-    STOMP.handle_receipt ~extra_headers ~eol:broker.b_frame_eol conn.conn_och frame
+let handle_receipt ?(extra_headers = []) conn frame =
+  match STOMP.receipt ~extra_headers frame with
+  | None -> return_unit
+  | Some receipt_frame -> Lwt_comm.send conn.conn receipt_frame
 
+let cmd_subscribe broker conn frame =
+  let ret extra_headers = handle_receipt ~extra_headers conn frame
   in try_lwt
     match STOMP.get_destination frame with
         Topic name -> begin
@@ -356,13 +361,12 @@ let cmd_subscribe broker conn frame =
         end
       | Control _ -> raise Not_found
   with Not_found ->
-    send_error broker conn
+    send_error conn
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx." >>
     ret []
 
 let cmd_unsubscribe broker conn frame =
-  let ret () =
-    STOMP.handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
+  let ret () = handle_receipt conn frame
   in try
     match STOMP.get_destination frame with
         Topic topic ->
@@ -373,14 +377,13 @@ let cmd_unsubscribe broker conn frame =
           remove_queue_subs broker queue conn; ret ()
       | Control _ -> raise Not_found
   with Not_found ->
-    send_error broker conn
+    send_error conn
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let cmd_disconnect broker conn _frame =
   DEBUG(show "Disconnect by %d." conn.conn_id);
-  Lwt_io.abort conn.conn_och >>
-  terminate_connection broker conn >>
-  fail End_of_file
+  Lwt_comm.close conn.conn;
+  terminate_connection broker conn
 
 let handle_control_message broker dst _conn _frame =
   if Str.string_match (Str.regexp "count-msgs/queue/") dst 0 then
@@ -404,7 +407,7 @@ let handle_control_message broker dst _conn _frame =
 
 let cmd_send broker conn frame =
   let ret extra_headers =
-    STOMP.handle_receipt ~extra_headers ~eol:broker.b_frame_eol conn.conn_och frame
+    handle_receipt ~extra_headers conn frame
 
   in try_lwt
     let destination = STOMP.get_destination frame in
@@ -423,7 +426,9 @@ let cmd_send broker conn frame =
     in DEBUG(show "Conn %d sending to %S."
               conn.conn_id (string_of_destination destination));
        match destination with
-        Topic topic -> send_to_topic broker topic msg >> ret []
+        Topic topic ->
+          lwt () = send_to_topic broker topic (STOMP.message_frame msg) in
+          ret []
       | Queue queue ->
           let save ?low_priority x =
             P.save_msg ?low_priority broker.b_msg_store x in
@@ -451,23 +456,23 @@ let cmd_send broker conn frame =
             end
       | Control dst -> handle_control_message broker dst conn frame >>= ret
   with Not_found ->
-    send_error broker conn
+    send_error conn
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
-let cmd_ack broker conn frame =
+let cmd_ack _broker conn frame =
   (try
     let msg_id = STOMP.get_header frame "message-id" in
       wakeup (H.find conn.conn_pending_acks msg_id) ();
    with Not_found -> ());
-  STOMP.handle_receipt ~eol:broker.b_frame_eol conn.conn_och frame
+  handle_receipt conn frame
 
 let ignore_command _broker _conn _frame = return ()
 
 let command_handlers = H.create 13
 let register_command (name, f) = H.add command_handlers name f
 
-let not_implemented broker conn frame =
-  send_error broker conn "Not implemented: %s" frame.STOMP.fr_command
+let not_implemented _broker conn frame =
+  send_error conn "Not implemented: %s" frame.STOMP.fr_command
 
 let () =
   List.iter register_command
@@ -487,19 +492,21 @@ let handle_frame broker conn frame =
     H.find command_handlers frame.STOMP.fr_command
       broker conn frame
   with Not_found ->
-    send_error broker conn "Unknown command %S." frame.STOMP.fr_command
+    send_error conn "Unknown command %S." frame.STOMP.fr_command
 
 let handle_connection broker conn =
   let rec loop () =
-    lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol conn.conn_ich in
+    lwt frame = Lwt_comm.recv conn.conn in
     handle_frame broker conn frame >>
     loop ()
   in
     DEBUG(show "New connection: %d" conn.conn_id);
     loop ()
 
-let connect_error msg ich och =
-  Lwt_io.write och msg >> Lwt_io.flush och >> Lwt_io.abort ich
+exception Connect_error of string
+
+let connect_error msg =
+  fail (Connect_error msg)
 
 let valid_credentials broker frame =
   try
@@ -510,25 +517,17 @@ let valid_credentials broker frame =
        true
   with Not_found | Exit -> false
 
-let rec establish_connection broker fd =
-  let ich = Lwt_io.of_fd ~mode:Lwt_io.input fd in
-  let och = Lwt_io.of_fd ~mode:Lwt_io.output fd in
-    try_lwt
-      do_establish_connection broker ich och
-    finally
-      Lwt_io.abort och
 
-and do_establish_connection broker ich och =
-  lwt frame = STOMP.read_stomp_frame ~eol:broker.b_frame_eol ich in
+let do_establish_connection broker c =
+  lwt frame = Lwt_comm.recv c in
     match frame.STOMP.fr_command with
         "CONNECT" when not (valid_credentials broker frame) ->
-          connect_error "Invalid credentials." ich och
+          connect_error "Invalid credentials."
       | "CONNECT" ->
           let conn =
             {
               conn_id = new_conn_id ();
-              conn_ich = ich;
-              conn_och = och;
+              conn = c;
               conn_pending_acks = H.create 13;
               conn_queues = H.create 13;
               conn_topics = H.create 13;
@@ -536,12 +535,12 @@ and do_establish_connection broker ich och =
             }
           in begin
             try_lwt
-              STOMP.write_stomp_frame ~eol:broker.b_frame_eol och
+              lwt () = Lwt_comm.send c
                 {
                   STOMP.fr_command = "CONNECTED";
                   fr_headers = ["session", string_of_int conn.conn_id];
                   fr_body = "";
-                } >>
+                } in
               handle_connection broker conn
             with
               | Lwt_io.Channel_closed _ | End_of_file | Sys_error _ | Unix.Unix_error _ ->
@@ -552,25 +551,32 @@ and do_establish_connection broker ich och =
                           conn.conn_id (Printexc.to_string e);
                         show "backtrace:\n%s" (Printexc.get_backtrace ());
                         Printexc.print_backtrace stderr);
-                  Lwt_io.abort och >> terminate_connection broker conn
+                  Lwt_comm.close c;
+                  terminate_connection broker conn
           end
-      | _ -> connect_error "ERROR\n\nExpected CONNECT frame.\000\n" ich och
+      | _ -> connect_error "ERROR\n\nExpected CONNECT frame.\000\n"
+
+let establish_connection broker conn =
+    try_lwt
+      do_establish_connection broker conn
+    with e ->
+      eprintf "Got toplevel exception: %s\n%!" (Printexc.to_string e);
+      Printexc.print_backtrace stderr;
+      Lwt_unix.sleep 0.01
+    finally
+      Lwt_comm.close conn;
+      return_unit
 
 let make_broker
-      ?(frame_eol = true) ?(force_send_async = false)
-      ?(send_async_max_mem = 32 * 1024 * 1024)
-      ?(max_prefetch=10) ?login ?passcode
-      msg_store address =
-  let sock = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-  Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
-  Lwt_unix.bind sock address;
-  Lwt_unix.listen sock 1024;
-  return {
+      ~frame_eol ~force_send_async
+      ~send_async_max_mem
+      ~max_prefetch ~login ~passcode
+      msg_store =
+  {
     b_connections = CONNS.empty;
     b_queues = H.create 13;
     b_topics = H.create 13;
     b_prefix_topics = TST.empty;
-    b_socket = sock;
     b_frame_eol = frame_eol;
     b_msg_store = msg_store;
     b_force_async = force_send_async;
@@ -582,22 +588,59 @@ let make_broker
     b_max_prefetch = max_prefetch;
   }
 
-let server_loop ?(debug = false) broker =
+let make_server ?(frame_eol = true) ?(force_send_async = false)
+      ?(send_async_max_mem = 32 * 1024 * 1024)
+      ?(max_prefetch=10) ?login ?passcode
+      ?(debug = false)
+      msg_store
+ : ( ( (STOMP.stomp_frame, STOMP.stomp_frame, [> ]) Lwt_comm.server
+     * Lwt_comm.server_ctl
+     )
+   * broker
+   )
+   Lwt.t
+ =
+  let broker = make_broker
+      ~frame_eol ~force_send_async
+      ~send_async_max_mem
+      ~max_prefetch ~login ~passcode
+      msg_store
+  in
   let broker = { broker with b_debug = debug } in
-  let rec loop () =
-    (try_lwt
-      lwt (fd, _addr) = Lwt_unix.accept broker.b_socket in
-        Lwt_unix.setsockopt fd Unix.TCP_NODELAY true;
-        ignore_result (establish_connection broker) fd;
-        return ()
-     with e ->
-       eprintf "Got toplevel exception: %s\n%!" (Printexc.to_string e);
-       Printexc.print_backtrace stderr;
-       Lwt_unix.sleep 0.01) >>
-    loop () in
   let t0 = Unix.gettimeofday () in
     eprintf "Performing crash recovery... %!";
     lwt () = P.crash_recovery broker.b_msg_store in
       eprintf "DONE (%8.5fs)\n%!" (Unix.gettimeofday () -. t0);
-      loop ()
+    return (Lwt_comm.duplex (establish_connection broker), broker)
+
+let unix_func broker
+ : (STOMP.stomp_frame, STOMP.stomp_frame, _) Lwt_comm.unix_func
+ =
+  Lwt_comm.unix_func_of_maps
+    ~setup_fd:(fun fd ->
+      Lwt_unix.setsockopt fd Unix.TCP_NODELAY true
+        (* todo: protect from write+write+read with Lwt_comm (buffering?..) *);
+      return_unit
+    )
+    (STOMP.read_stomp_frame ~eol:broker.b_frame_eol)
+    (STOMP.write_stomp_frame ~eol:broker.b_frame_eol)
+    ~on_server_close:(fun ich och exn ->
+      lwt () =
+        match exn with
+        | End_of_file -> return_unit
+        | Connect_error msg ->
+            Lwt_io.write och msg >> Lwt_io.flush och
+        | e -> fail e
+      in
+        Lwt_io.abort ich
+    )
+
+let run_unix_server_loop sockaddr (mq_server, broker) =
+  Lwt_comm.run_unix_server
+    mq_server
+    Unix.PF_INET Unix.SOCK_STREAM 0
+    ~listen:1024
+    sockaddr
+    (unix_func broker)
+
 end (* Make functor *)

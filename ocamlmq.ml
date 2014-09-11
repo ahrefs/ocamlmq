@@ -64,9 +64,12 @@ let () =
         eprintf "Initializing database... %!";
         Mq_sqlite_persistence.initialize msg_store >>
         let () = eprintf "DONE\n%!" in
-        lwt broker = SERVER.make_broker ~max_prefetch:!max_prefetch
-                       ?login:!login ?passcode:!passcode msg_store addr
-        in SERVER.server_loop ~debug:!debug broker
+        lwt ((server, server_ctl), broker) =
+          SERVER.make_server ~max_prefetch:!max_prefetch ~debug:!debug
+            ?login:!login ?passcode:!passcode msg_store
+        in
+        SERVER.run_unix_server_loop addr (server, broker);
+        Lwt_comm.wait_for_server_shutdown server_ctl
     end
 
 
