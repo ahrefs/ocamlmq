@@ -4,6 +4,8 @@
 *.cmx*
 *.cmi
 *.cmo
+*.cma
+*.a
 *.omc
 .omakedb*
 .*swp
