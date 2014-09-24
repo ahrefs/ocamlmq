@@ -80,6 +80,7 @@ type broker = {
   b_login : string option;
   b_passcode : string option;
   b_max_prefetch : int;
+  b_ordering : bool;
 }
 
 DEFINE DEBUG(what_to_print) = if broker.b_debug then what_to_print
@@ -458,13 +459,19 @@ let cmd_send broker conn frame =
           let save ?low_priority x =
             P.save_msg ?low_priority broker.b_msg_store x in
           let len = String.length msg.msg_body in
-            if broker.b_async_maxmem - len <= broker.b_async_usedmem ||
+            if broker.b_ordering ||
+               broker.b_async_maxmem - len <= broker.b_async_usedmem ||
               (not broker.b_force_async &&
                 List.mem_assoc "receipt" frame.STOMP.fr_headers)
             then begin
               lwt () = save msg in
               lwt () = ret [] in
-                ignore_result (send_to_queue broker queue) msg;
+                if broker.b_ordering
+                then begin
+                  ignore_result (send_saved_messages broker) queue
+                end else begin
+                  ignore_result (send_to_queue broker queue) msg
+                end;
                 return ()
             end else begin
               broker.b_async_usedmem <- broker.b_async_usedmem + len;
@@ -596,6 +603,7 @@ let make_broker
       ~frame_eol ~force_send_async
       ~send_async_max_mem
       ~max_prefetch ~login ~passcode
+      ~ordering
       msg_store =
   {
     b_connections = CONNS.empty;
@@ -611,12 +619,14 @@ let make_broker
     b_login = login;
     b_passcode = passcode;
     b_max_prefetch = max_prefetch;
+    b_ordering = ordering;
   }
 
 let make_server ?(frame_eol = true) ?(force_send_async = false)
       ?(send_async_max_mem = 32 * 1024 * 1024)
       ?(max_prefetch=10) ?login ?passcode
       ?(debug = false)
+      ?(ordering = false)
       msg_store
  : ( ( (STOMP.stomp_frame, STOMP.stomp_frame, [> ]) Lwt_comm.server
      * Lwt_comm.server_ctl
@@ -629,6 +639,7 @@ let make_server ?(frame_eol = true) ?(force_send_async = false)
       ~frame_eol ~force_send_async
       ~send_async_max_mem
       ~max_prefetch ~login ~passcode
+      ~ordering
       msg_store
   in
   let broker = { broker with b_debug = debug } in

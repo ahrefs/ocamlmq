@@ -366,6 +366,20 @@ let get_msg_from_mem_no_order t dest =
              tset_remove t msg unsent_ord);
           Some msg
 
+let get_msg_from_mem_order t dest =
+  match BatHashtbl.find_option t.in_mem dest with
+  | None -> None
+  | Some (unsent, want_ack, unsent_ord) ->
+      match try Some (TSET.min_elt unsent_ord) with Not_found -> None with
+      | None -> None
+      | Some msg ->
+          t.ack_pending <- SSET.add msg.msg_id t.ack_pending;
+          let v = (msg.msg_priority, msg) in
+          Hashtbl.replace t.in_mem dest
+            (MSET.remove v unsent, SSET.add msg.msg_id want_ack,
+             tset_remove t msg unsent_ord);
+          Some msg
+
 let get_msg_from_db t dest =
   match
     select_one_f_maybe t.db msg_of_tuple
@@ -388,9 +402,16 @@ let get_msg_from_db t dest =
 
 let get_msg_for_delivery t dest =
   return begin
-    match get_msg_from_mem_no_order t dest with
-    | (Some _msg) as some_msg -> some_msg
-    | None -> get_msg_from_db t dest
+    if t.ordering
+    then begin
+      match get_msg_from_db t dest with
+      | (Some _msg) as some_msg -> some_msg
+      | None -> get_msg_from_mem_order t dest
+    end else begin
+      match get_msg_from_mem_no_order t dest with
+      | (Some _msg) as some_msg -> some_msg
+      | None -> get_msg_from_db t dest
+    end
   end
 
 let count_queue_msgs t dst =
