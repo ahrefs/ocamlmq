@@ -51,7 +51,7 @@ section
     OCamlProgram(test, $(OBJECTS) $(TEST_FILES) test)
     $(addsuffixes .cmi .cmo .cmx .o, $(TEST_FILES) test):
 
-MQ_LIB = $(addsuffixes .cma .cmxa, ocamlmq)
+MQ_LIB = $(addsuffixes .cma .cmxa .a, ocamlmq)
 INSTALL_CMIS[] = $(addsuffix .cmi, $(OBJECTS))
 INSTALL_FILES[] = META $(INSTALL_CMIS) $(MQ_LIB)
 
