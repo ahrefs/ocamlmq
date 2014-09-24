@@ -405,6 +405,30 @@ let handle_control_message broker dst _conn _frame =
   else
     return []
 
+(* This function returns timestamp, either equal to [Unix.gettimeofday ()],
+   or slightly increased, so on each call [get_timestamp] returns value
+   strictly greater than values returned on previous calls.
+   Typical increment (for dates close to 2014-09-18) is 1.2e-07 seconds.
+ *)
+let get_timestamp =
+  let last_ts = ref (Unix.gettimeofday () -. 1.)
+  and inc = ref (1. /. 1073741824.) in
+  let rec do_inc ts =
+    let ts' = ts +. !inc in
+    if ts = ts'
+    then begin
+      inc := 2. *. !inc;
+      (* Printf.eprintf "GET_TS: trying inc=%.20f\n%!" !inc; *)
+      do_inc ts
+    end else
+      ts'
+  in fun () ->
+    let now = Unix.gettimeofday ()
+    and ts = !last_ts in
+    let ts = if now > ts then now else do_inc ts in
+    last_ts := ts;
+    ts
+
 let cmd_send broker conn frame =
   let ret extra_headers =
     handle_receipt ~extra_headers conn frame
@@ -416,7 +440,7 @@ let cmd_send broker conn frame =
         msg_id = String.concat "-" ["conn"; string_of_int conn.conn_id; new_msg_id ()];
         msg_destination = destination;
         msg_priority = 0;
-        msg_timestamp = Unix.gettimeofday ();
+        msg_timestamp = get_timestamp ();
         msg_body = frame.STOMP.fr_body;
         msg_ack_timeout =
           (try
