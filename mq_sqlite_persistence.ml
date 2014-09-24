@@ -17,9 +17,25 @@ module MSET = Set.Make(struct
                        end)
 module SSET = Set.Make(String)
 
+(* "timestamp-ordered set": ordering on 1. priority, 2. timestamp, 3. msg_id *)
+module TSET = Set.Make
+  (struct
+     type t = message
+     let compare (m1 : t) m2 =
+       match Pervasives.compare m1.msg_priority m2.msg_priority with
+       | r when r < 0 -> -1
+       | 0 -> begin
+           match Pervasives.compare m1.msg_timestamp m2.msg_timestamp with
+           | r when r < 0 -> -1
+           | 0 -> String.compare m1.msg_id m2.msg_id
+           | _ (* r > 0 *) -> 1
+         end
+       | _ (* r > 0 *) -> 1
+   end)
+
 type t = {
   db : Sqlexpr.db;
-  in_mem : (string, MSET.t * SSET.t) Hashtbl.t;
+  in_mem : (string, MSET.t * SSET.t * TSET.t) Hashtbl.t;
   in_mem_msgs : (string, message) Hashtbl.t;
   mutable ack_pending : SSET.t;
   mutable flush_alarm : unit Lwt.u;
@@ -28,8 +44,24 @@ type t = {
   binlog_file : string option;
   mutable binlog : Binlog.t option;
   sync_binlog : bool;
-  mutable shutdown_flushers : bool
+  mutable shutdown_flushers : bool;
+  ordering : bool;
 }
+
+let tset_add t msg s =
+  if t.ordering
+  then TSET.add msg s
+  else s
+
+let tset_singleton t msg =
+  if t.ordering
+  then TSET.singleton msg
+  else TSET.empty
+
+let tset_remove t msg s =
+  if t.ordering
+  then TSET.remove msg s
+  else s
 
 let count_unmaterialized_pending_acks db =
   select_one db sqlc"SELECT @L{COUNT(*)} FROM pending_acks"
@@ -124,7 +156,7 @@ let check_sqlite_version_ok db =
       failwith (sprintf "Need sqlite3 >= 3.6.8 (found: %s)" v)
 
 let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
-         ?binlog ?(sync_binlog = false) file =
+         ?binlog ?(sync_binlog = false) ?(ordering = false) file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let t =
     { db = Sqlexpr.open_db file; in_mem = Hashtbl.create 13;
@@ -135,6 +167,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
       binlog_file = binlog; binlog = None;
       sync_binlog = sync_binlog;
       shutdown_flushers = false;
+      ordering = ordering;
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
@@ -209,15 +242,15 @@ let do_save_msg ?(can_flush = true) t sent msg =
   let v = (msg.msg_priority, msg) in
   begin
     try
-      let unsent, want_ack = Hashtbl.find t.in_mem dest in
+      let unsent, want_ack, unsent_ord = Hashtbl.find t.in_mem dest in
       let p =
-        if sent then (unsent, SSET.add msg.msg_id want_ack)
-        else (MSET.add v unsent, want_ack)
+        if sent then (unsent, SSET.add msg.msg_id want_ack, unsent_ord)
+        else (MSET.add v unsent, want_ack, tset_add t msg unsent_ord)
       in Hashtbl.replace t.in_mem dest p
     with Not_found ->
       let p =
-        if sent then (MSET.empty, SSET.singleton msg.msg_id)
-        else (MSET.singleton v, SSET.empty)
+        if sent then (MSET.empty, SSET.singleton msg.msg_id, TSET.empty)
+        else (MSET.singleton v, SSET.empty, tset_singleton t msg)
       in Hashtbl.add t.in_mem dest p
   end;
   Hashtbl.add t.in_mem_msgs msg.msg_id msg;
@@ -236,10 +269,12 @@ let register_ack_pending_msg t msg_id =
       if not r then begin
         let msg = Hashtbl.find t.in_mem_msgs msg_id in
         let dest = destination_name msg.msg_destination in
-        let unsent, want_ack = Hashtbl.find t.in_mem dest in
+        let unsent, want_ack, unsent_ord = Hashtbl.find t.in_mem dest in
         let v = (msg.msg_priority, msg) in
           t.ack_pending <- SSET.add msg_id t.ack_pending;
-          Hashtbl.replace t.in_mem dest (MSET.remove v unsent, SSET.add msg_id want_ack)
+          Hashtbl.replace t.in_mem dest
+            (MSET.remove v unsent, SSET.add msg_id want_ack,
+             tset_remove t msg unsent_ord)
       end;
       return (not r)
   else
@@ -290,8 +325,9 @@ let ack_msg t msg_id =
       Hashtbl.remove t.in_mem_msgs msg_id;
       t.ack_pending <- SSET.remove msg_id t.ack_pending;
       let dst = destination_name msg.msg_destination in
-      let unsent, want_ack = Hashtbl.find t.in_mem dst in
-        Hashtbl.replace t.in_mem dst (unsent, SSET.remove msg_id want_ack);
+      let unsent, want_ack, unsent_ord = Hashtbl.find t.in_mem dst in
+        Hashtbl.replace t.in_mem dst
+          (unsent, SSET.remove msg_id want_ack, unsent_ord);
         Option.map_default (fun log -> Binlog.cancel log msg) (return ()) t.binlog
   end else begin
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
@@ -307,46 +343,60 @@ let unack_msg t msg_id =
     let msg = Hashtbl.find t.in_mem_msgs msg_id in
     let dst = destination_name msg.msg_destination in
     let msg = Hashtbl.find t.in_mem_msgs msg_id in
-    let unsent, want_ack = Hashtbl.find t.in_mem dst in
+    let unsent, want_ack, unsent_ord = Hashtbl.find t.in_mem dst in
     let v = (msg.msg_priority, msg) in
-      Hashtbl.replace t.in_mem dst (MSET.add v unsent, SSET.remove msg_id want_ack)
+      Hashtbl.replace t.in_mem dst
+        (MSET.add v unsent, SSET.remove msg_id want_ack,
+         tset_add t msg unsent_ord)
   end else begin
     t.unacks <- SSET.add msg_id t.unacks;
   end;
   return ()
 
+let get_msg_from_mem_no_order t dest =
+  match BatHashtbl.find_option t.in_mem dest with
+  | None -> None
+  | Some (unsent, want_ack, unsent_ord) ->
+      match try Some (MSET.min_elt unsent) with Not_found -> None with
+      | None -> None
+      | Some ((_prio, msg) as v) ->
+          t.ack_pending <- SSET.add msg.msg_id t.ack_pending;
+          Hashtbl.replace t.in_mem dest
+            (MSET.remove v unsent, SSET.add msg.msg_id want_ack,
+             tset_remove t msg unsent_ord);
+          Some msg
+
+let get_msg_from_db t dest =
+  match
+    select_one_f_maybe t.db msg_of_tuple
+      sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
+                 @d{priority}, @f{ack_timeout}, @S{body}
+            FROM ocamlmq_msgs as msg
+           WHERE destination = %s
+             AND msg.ack_pending = 0
+             AND NOT EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)
+             AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)
+        ORDER BY priority, timestamp"
+      dest
+  with
+      None -> None
+    | Some msg ->
+        execute t.db sqlc"INSERT INTO pending_acks VALUES(%s)" msg.msg_id;
+        if count_unmaterialized_pending_acks t.db > 100L then
+          transaction t.db (materialize_pending_acks ~verbose:true);
+        Some msg
+
 let get_msg_for_delivery t dest =
-  try
-    let unsent, want_ack = Hashtbl.find t.in_mem dest in
-    let ((_prio, msg) as v) = MSET.min_elt unsent in
-      t.ack_pending <- SSET.add msg.msg_id t.ack_pending;
-      Hashtbl.replace t.in_mem dest
-        (MSET.remove v unsent, SSET.add msg.msg_id want_ack);
-      return (Some msg)
-  with Not_found ->
-    match
-      select_one_f_maybe t.db msg_of_tuple
-        sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
-                   @d{priority}, @f{ack_timeout}, @S{body}
-              FROM ocamlmq_msgs as msg
-             WHERE destination = %s
-               AND msg.ack_pending = 0
-               AND NOT EXISTS (SELECT 1 FROM pending_acks WHERE msg_id = msg.msg_id)
-               AND NOT EXISTS (SELECT 1 FROM acked_msgs WHERE msg_id = msg.msg_id)
-          ORDER BY priority, timestamp"
-        dest
-    with
-        None -> return None
-      | Some msg ->
-          execute t.db sqlc"INSERT INTO pending_acks VALUES(%s)" msg.msg_id;
-          if count_unmaterialized_pending_acks t.db > 100L then
-            transaction t.db (materialize_pending_acks ~verbose:true);
-          return (Some msg)
+  return begin
+    match get_msg_from_mem_no_order t dest with
+    | (Some _msg) as some_msg -> some_msg
+    | None -> get_msg_from_db t dest
+  end
 
 let count_queue_msgs t dst =
   let in_mem =
     try
-      let unsent, want_ack = Hashtbl.find t.in_mem dst in
+      let unsent, want_ack, _unsent_ord = Hashtbl.find t.in_mem dst in
         MSET.cardinal unsent + SSET.cardinal want_ack
     with Not_found -> 0 in
   let in_db =
