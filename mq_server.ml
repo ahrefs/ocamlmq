@@ -19,6 +19,7 @@ sig
   val get_msg_for_delivery : t -> string -> Mq_types.message option Lwt.t
   val count_queue_msgs : t -> string -> Int64.t Lwt.t
   val crash_recovery : t -> unit Lwt.t
+  val shutdown : t -> unit Lwt.t
 end
 
 module Make(P : PERSISTENCE) =
@@ -635,7 +636,15 @@ let make_server ?(frame_eol = true) ?(force_send_async = false)
     eprintf "Performing crash recovery... %!";
     lwt () = P.crash_recovery broker.b_msg_store in
       eprintf "DONE (%8.5fs)\n%!" (Unix.gettimeofday () -. t0);
-    return (Lwt_comm.duplex (establish_connection broker), broker)
+    return
+      (Lwt_comm.duplex (establish_connection broker)
+         ~on_shutdown: begin fun () ->
+           lwt () = P.shutdown broker.b_msg_store in
+           eprintf "ocamlmq server shut down.\n%!";
+           return_unit
+         end,
+       broker
+      )
 
 let unix_func broker
  : (STOMP.stomp_frame, STOMP.stomp_frame, _) Lwt_comm.unix_func

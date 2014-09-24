@@ -28,6 +28,7 @@ type t = {
   binlog_file : string option;
   mutable binlog : Binlog.t option;
   sync_binlog : bool;
+  mutable shutdown_flushers : bool
 }
 
 let count_unmaterialized_pending_acks db =
@@ -133,11 +134,15 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
       unacks = SSET.empty;
       binlog_file = binlog; binlog = None;
       sync_binlog = sync_binlog;
+      shutdown_flushers = false;
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
     Lwt.pick [Lwt_unix.sleep flush_period; wait_flush] >>
-    begin
+    if t.shutdown_flushers
+    then
+      return ()
+    else begin
       let wait, awaken = Lwt.wait () in
         flush t;
         t.flush_alarm <- awaken;
@@ -145,6 +150,10 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
     end in
   let rec loop_flush_unacks () =
     lwt () = Lwt_unix.sleep 0.1 in
+    if t.shutdown_flushers
+    then
+      return ()
+    else begin
       if not (SSET.is_empty t.unacks) then
         transaction t.db
           (fun db ->
@@ -152,6 +161,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
              SSET.iter (unack db) t.unacks);
       t.unacks <- SSET.empty;
       loop_flush_unacks ()
+    end
   in
     check_sqlite_version_ok t.db;
     ignore
@@ -358,5 +368,11 @@ let crash_recovery t =
           eprintf "(binlog: %d msgs) %!" (List.length msgs);
           Lwt_list.iter_s (do_save_msg ~can_flush:false t false) msgs
   end
+
+let shutdown t =
+  t.shutdown_flushers <- true;
+  flush t;
+  Sqlexpr.close_db t.db;
+  return_unit
 
 let init_db, _check_db, auto_check_db = sql_check"sqlite"
