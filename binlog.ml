@@ -44,7 +44,7 @@ let read_record ich =
                   msg_body = body; msg_ack_timeout = timeout
                 }
             in return r
-        | 'B' ->
+        | 'D' ->
             lwt id = read_string ich in return (Del id)
         | _ -> raise End_of_file
       end
