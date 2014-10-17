@@ -67,7 +67,7 @@ let dummy_subscription = { qs_prefetch = 0; qs_pending_acks = 0 }
 type connection = {
   conn_id : int;
   conn : (STOMP.stomp_frame,STOMP.stomp_frame,[`Connect|`Bidi]) Lwt_comm.conn;
-  mutable conn_pending_acks : (string, unit Lwt.u) H.t;
+  mutable conn_pending_acks : (string, unit Lwt.u option Lwt.u) H.t;
   conn_queues : (string, subscription) H.t;
   conn_topics : (string, unit) H.t; (* set of topics *)
   mutable conn_closed : bool;
@@ -249,11 +249,16 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
       if subs.qs_prefetch > 0 && subs.qs_pending_acks < subs.qs_prefetch then
         unblock_subscription listeners (conn, subs);
       return ()
-    end >>
+    end >>= fun store_wakener_opt ->
     begin
       DEBUG(show "Conn %d ACKed %S(%S)." conn.conn_id msg_id
               (string_of_destination msg.msg_destination));
-      P.ack_msg broker.b_msg_store msg_id >>
+      lwt () = P.ack_msg broker.b_msg_store msg_id in
+      begin
+        match store_wakener_opt with
+        | None -> ()
+        | Some store_wakener -> Lwt.wakeup store_wakener ()
+      end;
       (* try to send older messages for the subscription whose message
        * we just ACKed *)
       (ignore_result (send_saved_messages broker) queue;
@@ -492,11 +497,32 @@ let cmd_send broker conn frame =
       "Invalid or missing destination: must be of the form /queue/xxx or /topic/xxx."
 
 let cmd_ack _broker conn frame =
-  (try
-    let msg_id = STOMP.get_header frame "message-id" in
-      wakeup (H.find conn.conn_pending_acks msg_id) ();
-   with Not_found -> ());
-  handle_receipt conn frame
+  let conn_ack_wakener_opt =
+    try
+      let msg_id = STOMP.get_header frame "message-id" in
+      Some (H.find conn.conn_pending_acks msg_id)
+    with Not_found -> None
+  in
+  let receipt_frame_opt = STOMP.receipt frame in
+  lwt () =
+    match conn_ack_wakener_opt with
+    | None -> return_unit
+    | Some conn_ack_wakener ->
+        let (store_waiter_opt, store_wakener_opt) =
+          match receipt_frame_opt with
+          | None -> (None, None)
+          | Some _receipt_frame ->
+              let (wai, wak) = Lwt.task () in
+              (Some wai, Some wak)
+        in
+        wakeup conn_ack_wakener store_wakener_opt;
+        match store_waiter_opt with
+        | None -> return_unit
+        | Some store_waiter -> store_waiter
+  in
+  match receipt_frame_opt with
+  | None -> return_unit
+  | Some receipt_frame -> Lwt_comm.send conn.conn receipt_frame
 
 let ignore_command _broker _conn _frame = return ()
 

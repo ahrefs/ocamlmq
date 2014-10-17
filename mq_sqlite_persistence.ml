@@ -319,7 +319,7 @@ let get_ack_pending_msg t msg_id =
       msg_id
   end
 
-let ack_msg t msg_id =
+let do_ack_msg ~can_flush t msg_id =
   if SSET.mem msg_id t.ack_pending then begin
     let msg = Hashtbl.find t.in_mem_msgs msg_id in
       Hashtbl.remove t.in_mem_msgs msg_id;
@@ -327,15 +327,19 @@ let ack_msg t msg_id =
       let dst = destination_name msg.msg_destination in
       let unsent, want_ack, unsent_ord = Hashtbl.find t.in_mem dst in
         Hashtbl.replace t.in_mem dst
-          (unsent, SSET.remove msg_id want_ack, unsent_ord);
-        Option.map_default (fun log -> Binlog.cancel log msg) (return ()) t.binlog
+          (unsent, SSET.remove msg_id want_ack, unsent_ord)
   end else begin
     execute t.db sqlc"INSERT INTO acked_msgs(msg_id) VALUES(%s)" msg_id;
     t.ack_pending <- SSET.remove msg_id t.ack_pending;
-    if count_acked_messages t.db > 100L then
-      transaction t.db (flush_acked_msgs ~verbose:true);
-    return ()
+    if can_flush && count_acked_messages t.db > 100L then
+      transaction t.db (flush_acked_msgs ~verbose:true)
   end
+
+let ack_msg t msg_id =
+  lwt () = Option.map_default
+    (fun log -> Binlog.cancel log msg_id) (return ()) t.binlog in
+  do_ack_msg ~can_flush:true t msg_id;
+  return ()
 
 let unack_msg t msg_id =
   if SSET.mem msg_id t.ack_pending then begin
@@ -434,10 +438,15 @@ let crash_recovery t =
   begin match t.binlog_file with
       None -> return ()
     | Some f ->
-        lwt binlog, msgs = Binlog.make ~sync:t.sync_binlog f in
+        lwt binlog, added_msgs, acked_msg_ids =
+          Binlog.make ~sync:t.sync_binlog f
+        in
           t.binlog <- Some binlog;
-          eprintf "(binlog: %d msgs) %!" (List.length msgs);
-          lwt () = Lwt_list.iter_s (do_save_msg ~can_flush:false t false) msgs in
+          eprintf "(binlog: %d msgs added, %d msgs acked) %!"
+            (List.length added_msgs) (List.length acked_msg_ids);
+          lwt () = Lwt_list.iter_s (do_save_msg ~can_flush:false t false)
+            added_msgs in
+          List.iter (do_ack_msg ~can_flush:false t) acked_msg_ids;
           flush t;
           return ()
   end

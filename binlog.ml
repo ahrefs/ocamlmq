@@ -71,7 +71,7 @@ let write_record ?(flush = true) och r =
   Lwt_io.atomic (fun och -> write_record och r) och >>
   if flush then Lwt_io.flush och else return ()
 
-let cancel t msg = write_record t.och (Del msg.msg_id)
+let cancel t msg_id = write_record t.och (Del msg_id)
 let add t msg = write_record t.och (Add msg)
 
 (* Creates [dst] even if [src] cannot be read *)
@@ -86,18 +86,26 @@ let copy src dst =
          ~buffer_size:(1024 * 1024)
          ~mode:Lwt_io.output dst
          (fun och ->
-            let h = Hashtbl.create 13 in
+            let h_add = Hashtbl.create 13
+            and h_ack = Hashtbl.create 13 in
             let rec copy_loop () =
               read_record ich >>= function
                   Add msg as x ->
-                    Hashtbl.add h msg.msg_id msg;
+                    Hashtbl.add h_add msg.msg_id msg;
                     write_record ~flush:false och x >> copy_loop ()
                 | Del msg_id as x ->
-                    Hashtbl.remove h msg_id;
+                    if Hashtbl.mem h_add msg_id
+                    then
+                      Hashtbl.remove h_add msg_id
+                    else
+                      Hashtbl.add h_ack msg_id ();
                     write_record ~flush:false och x >> copy_loop ()
                 | Nothing -> return ()
             in copy_loop () >>
-               return (Hashtbl.fold (fun _ msg l -> msg :: l) h [])))
+               let l_add = Hashtbl.fold (fun _ msg l -> msg :: l) h_add []
+               and l_ack = Hashtbl.fold (fun msg_id () l -> msg_id :: l)
+                 h_ack [] in
+               return (l_add, l_ack)))
 
 let copy src dst =
   try_lwt
@@ -106,15 +114,15 @@ let copy src dst =
     Unix.Unix_error (ue, _, _) as e ->
       if ue = Unix.ENOENT
       then
-        return []
+        return ([], [])
       else
         fail e
 
 let make ?(sync = false) file =
   let tmp = sprintf "%s.%d.%d" file (Unix.getpid ()) (Random.int 0x3FFFFFFF) in
-  lwt msgs = copy file tmp in
+  lwt (added_msgs, acked_msg_ids) = copy file tmp in
     Sys.rename tmp file;
     let sync = if sync then [ Unix.O_SYNC ] else [] in
     let fd = Unix.openfile file ([ Unix.O_WRONLY; ] @ sync) 0o640 in
     let och = Lwt_io.of_unix_fd ~mode:Lwt_io.output fd in
-      return ({ fd = fd; och = och; }, msgs)
+      return ({ fd = fd; och = och; }, added_msgs, acked_msg_ids)
