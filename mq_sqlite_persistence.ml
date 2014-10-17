@@ -119,7 +119,7 @@ and do_flush t db =
   Hashtbl.iter
     (fun _ msg ->
        execute db
-         sqlc"INSERT INTO ocamlmq_msgs
+         sqlc"INSERT OR IGNORE INTO ocamlmq_msgs
                (ack_pending, msg_id, priority, destination, timestamp,
                 ack_timeout, body)
              VALUES(0, %s, %d, %s, %f, %f, %S)"
@@ -437,7 +437,9 @@ let crash_recovery t =
         lwt binlog, msgs = Binlog.make ~sync:t.sync_binlog f in
           t.binlog <- Some binlog;
           eprintf "(binlog: %d msgs) %!" (List.length msgs);
-          Lwt_list.iter_s (do_save_msg ~can_flush:false t false) msgs
+          lwt () = Lwt_list.iter_s (do_save_msg ~can_flush:false t false) msgs in
+          flush t;
+          return ()
   end
 
 let shutdown t =
