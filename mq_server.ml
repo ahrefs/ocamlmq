@@ -454,8 +454,8 @@ let cmd_send broker conn frame =
              float_of_string (STOMP.get_header frame "ack-timeout")
            with _ -> 0.)
       }
-    in DEBUG(show "Conn %d sending to %S."
-              conn.conn_id (string_of_destination destination));
+    in DEBUG(show "Conn %d sending to %S (msg_id=%S)."
+              conn.conn_id (string_of_destination destination) msg.msg_id);
        match destination with
         Topic topic ->
           lwt () = send_to_topic broker topic (STOMP.message_frame msg) in
