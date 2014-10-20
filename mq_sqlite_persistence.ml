@@ -46,6 +46,7 @@ type t = {
   sync_binlog : bool;
   mutable shutdown_flushers : bool;
   ordering : bool;
+  with_lock : 'a . (unit -> 'a Lwt.t) -> 'a Lwt.t
 }
 
 let tset_add t msg s =
@@ -158,6 +159,7 @@ let check_sqlite_version_ok db =
 let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
          ?binlog ?(sync_binlog = false) ?(ordering = false) file =
   let wait_flush, awaken_flush = Lwt.wait () in
+  let mut = Lwt_mutex.create () in
   let t =
     { db = Sqlexpr.open_db file; in_mem = Hashtbl.create 13;
       in_mem_msgs = Hashtbl.create 13; ack_pending = SSET.empty;
@@ -168,6 +170,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
       sync_binlog = sync_binlog;
       shutdown_flushers = false;
       ordering = ordering;
+      with_lock = (fun f -> Lwt_mutex.with_lock mut f);
     } in
   let flush_period = max flush_period 0.005 in
   let rec loop_flush wait_flush =
@@ -177,7 +180,10 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
       return ()
     else begin
       let wait, awaken = Lwt.wait () in
-        flush t;
+        lwt () = t.with_lock begin fun () ->
+          flush t;
+          return ()
+        end in
         t.flush_alarm <- awaken;
         loop_flush wait
     end in
@@ -259,9 +265,24 @@ let do_save_msg ?(can_flush = true) t sent msg =
   return ()
 
 let save_msg t ?low_priority msg =
-  ignore low_priority;
-  Option.map_default (fun log -> Binlog.add log msg) (return ()) t.binlog >>
-  do_save_msg t false msg
+  (* Locking is needed as there happens following scenario:
+     1. save_msg is called from [Mq_server.cmd_send],
+     2. message is stored to binlog (but not to t.in_mem_msgs),
+     3. periodical flush awakes on timer, flushes messages from t.in_mem_msgs
+        (without the message passed to save_msg, see next step) and truncates
+        binlog,
+     4. message is stored to t.in_mem_msgs,
+     5. program is killed.
+     So the message is not flushed to persistent storage and also is absent in
+     binlog.
+     [save_msg] and [loop_flush] lock same mutex (using [with_lock]) to avoid
+     this scenario.
+   *)
+  t.with_lock begin fun () ->
+    ignore low_priority;
+    Option.map_default (fun log -> Binlog.add log msg) (return ()) t.binlog >>
+    do_save_msg t false msg
+  end
 
 let register_ack_pending_msg t msg_id =
   if Hashtbl.mem t.in_mem_msgs msg_id then
