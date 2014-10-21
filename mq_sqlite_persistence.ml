@@ -357,10 +357,12 @@ let do_ack_msg ~can_flush t msg_id =
   end
 
 let ack_msg t msg_id =
-  lwt () = Option.map_default
-    (fun log -> Binlog.cancel log msg_id) (return ()) t.binlog in
-  do_ack_msg ~can_flush:true t msg_id;
-  return ()
+  t.with_lock begin fun () ->
+    lwt () = Option.map_default
+      (fun log -> Binlog.cancel log msg_id) (return ()) t.binlog in
+    do_ack_msg ~can_flush:true t msg_id;
+    return ()
+  end
 
 let unack_msg t msg_id =
   if SSET.mem msg_id t.ack_pending then begin
