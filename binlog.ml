@@ -36,12 +36,14 @@ let read_record ich =
             lwt timestamp = LE.read_float64 ich in
             lwt body = read_string ich in
             lwt timeout = LE.read_float64 ich in
+            lwt headers_ser = read_string ich in
             let r =
               Add
                 {
                   msg_id = id; msg_destination = Queue dest;
                   msg_priority = prio; msg_timestamp = timestamp;
-                  msg_body = body; msg_ack_timeout = timeout
+                  msg_body = body; msg_ack_timeout = timeout;
+                  msg_headers = Mq_types.deserialize_headers headers_ser;
                 }
             in return r
         | 'D' ->
@@ -65,7 +67,8 @@ let write_record och = function
       LE.write_int och msg.msg_priority >>
       LE.write_float64 och msg.msg_timestamp >>
       write_string och msg.msg_body >>
-      LE.write_float64 och msg.msg_ack_timeout
+      LE.write_float64 och msg.msg_ack_timeout >>
+      write_string och (Mq_types.serialize_headers msg.msg_headers)
 
 let write_record ?(flush = true) och r =
   Lwt_io.atomic (fun och -> write_record och r) och >>

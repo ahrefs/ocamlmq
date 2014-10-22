@@ -122,10 +122,12 @@ and do_flush t db =
        execute db
          sqlc"INSERT OR IGNORE INTO ocamlmq_msgs
                (ack_pending, msg_id, priority, destination, timestamp,
-                ack_timeout, body)
-             VALUES(0, %s, %d, %s, %f, %f, %S)"
+                ack_timeout, body, headers)
+             VALUES(0, %s, %d, %s, %f, %f, %S, %S)"
          msg.msg_id msg.msg_priority (destination_name msg.msg_destination)
-         msg.msg_timestamp msg.msg_ack_timeout msg.msg_body)
+         msg.msg_timestamp msg.msg_ack_timeout msg.msg_body
+         (Mq_types.serialize_headers msg.msg_headers)
+    )
     t.in_mem_msgs;
   SSET.iter
     (execute db sqlc"INSERT INTO pending_acks(msg_id) VALUES(%s)")
@@ -223,7 +225,8 @@ let initialize t =
               destination VARCHAR(255) NOT NULL,
               timestamp DOUBLE NOT NULL,
               ack_timeout DOUBLE NOT NULL,
-              body BLOB NOT NULL
+              body BLOB NOT NULL,
+              headers BLOB NOT NULL
             )";
   execute t.db
     sqlinit"CREATE INDEX IF NOT EXISTS
@@ -314,7 +317,8 @@ let register_ack_pending_msg t msg_id =
             return true
           end
 
-let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
+let msg_of_tuple
+  (msg_id, dst, timestamp, priority, ack_timeout, body, headers_ser) =
   {
     msg_id = msg_id;
     msg_destination = Queue dst;
@@ -322,6 +326,7 @@ let msg_of_tuple (msg_id, dst, timestamp, priority, ack_timeout, body) =
     msg_timestamp = timestamp;
     msg_ack_timeout = ack_timeout;
     msg_body = body;
+    msg_headers = Mq_types.deserialize_headers headers_ser;
   }
 
 let get_ack_pending_msg t msg_id =
@@ -331,7 +336,7 @@ let get_ack_pending_msg t msg_id =
   with Not_found ->
     select_one_f_maybe t.db msg_of_tuple
       sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
-                 @d{priority}, @f{ack_timeout}, @S{body}
+                 @d{priority}, @f{ack_timeout}, @S{body}, @S{headers}
             FROM ocamlmq_msgs AS msg
            WHERE msg_id = %s
              AND (msg.ack_pending OR
@@ -411,7 +416,7 @@ let get_msg_from_db t dest =
   match
     select_one_f_maybe t.db msg_of_tuple
       sqlc"SELECT @s{msg_id}, @s{destination}, @f{timestamp},
-                 @d{priority}, @f{ack_timeout}, @S{body}
+                 @d{priority}, @f{ack_timeout}, @S{body}, @S{headers}
             FROM ocamlmq_msgs as msg
            WHERE destination = %s
              AND msg.ack_pending = 0

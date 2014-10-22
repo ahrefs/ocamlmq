@@ -449,6 +449,7 @@ let cmd_send broker conn frame =
         msg_priority = 0;
         msg_timestamp = get_timestamp ();
         msg_body = frame.STOMP.fr_body;
+        msg_headers = frame.STOMP.fr_headers;
         msg_ack_timeout =
           (try
              float_of_string (STOMP.get_header frame "ack-timeout")
@@ -463,7 +464,13 @@ let cmd_send broker conn frame =
       | Queue queue ->
           let save ?low_priority x =
             P.save_msg ?low_priority broker.b_msg_store x in
-          let len = String.length msg.msg_body in
+          let len = String.length msg.msg_body +
+            List.fold_left
+              (fun acc (k, v) -> acc + String.length k + String.length v
+              )
+              0
+              msg.msg_headers
+          in
             if broker.b_ordering ||
                broker.b_async_maxmem - len <= broker.b_async_usedmem ||
               (not broker.b_force_async &&

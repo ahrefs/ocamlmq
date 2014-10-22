@@ -69,11 +69,11 @@ let receipt ?(extra_headers=[]) frame =
 let message_frame msg =
     {
       fr_command = "MESSAGE";
-      fr_headers = [
-        "message-id", msg.msg_id;
-        "destination", string_of_destination msg.msg_destination;
-        "content-length", string_of_int (String.length msg.msg_body);
-      ];
+      fr_headers =
+        ("message-id", msg.msg_id) ::
+        ("destination", string_of_destination msg.msg_destination) ::
+        ("content-length", string_of_int (String.length msg.msg_body)) ::
+        msg.msg_headers;
       fr_body = msg.msg_body
     }
 
