@@ -449,7 +449,16 @@ let cmd_send broker conn frame =
         msg_priority = 0;
         msg_timestamp = get_timestamp ();
         msg_body = frame.STOMP.fr_body;
-        msg_headers = frame.STOMP.fr_headers;
+        msg_headers = List.filter begin fun (k, _v) ->
+            match k with
+            | (* don't store them as they are added by [STOMP.message_frame] *)
+              "message-id" | "destination" | "content-length"
+            | (* receipt handling is based on [frame], not on [msg] *)
+              "receipt"
+                -> false
+            | _ -> true
+          end
+          frame.STOMP.fr_headers;
         msg_ack_timeout =
           (try
              float_of_string (STOMP.get_header frame "ack-timeout")
