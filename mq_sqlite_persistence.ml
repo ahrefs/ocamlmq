@@ -108,8 +108,10 @@ let rec flush t =
          unmaterialized_ack_pendings <> 0L || acked_msgs <> 0L
       then begin
         flushed := true;
+(*
         pr "Flushing to disk: %d msgs, %d + %Ld pending ACKS, %Ld ACKS"
           in_mem_msgs ack_pending unmaterialized_ack_pendings acked_msgs;
+*)
         do_flush t db;
       end
   end;
