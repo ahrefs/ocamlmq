@@ -1,6 +1,4 @@
-
 open Lwt
-open Printf
 open Mq_types
 
 module Option  = BatOption
@@ -45,6 +43,7 @@ type t = {
   mutable binlog : Binlog.t option;
   sync_binlog : bool;
   mutable shutdown_flushers : bool;
+  debug : bool;
   ordering : bool;
   with_lock : 'a . (unit -> 'a Lwt.t) -> 'a Lwt.t
 }
@@ -70,8 +69,8 @@ let count_unmaterialized_pending_acks db =
 let count_acked_messages db =
   select_one db sqlc"SELECT @L{COUNT(*)} FROM acked_msgs"
 
-let pr fmt = ksprintf (eprintf "%s%!") fmt
-let puts fmt = ksprintf prerr_endline fmt
+let pr fmt = Printf.(ksprintf (eprintf "%s%!") fmt)
+let puts fmt = Printf.(ksprintf prerr_endline fmt)
 
 let timed verbose gen_msg f =
   let t0 = Unix.gettimeofday () in
@@ -81,7 +80,9 @@ let timed verbose gen_msg f =
       y
 
 let flush_acked_msgs ?(verbose = false) db =
-  timed verbose (fun () -> sprintf "Flushing %Ld ACKs" (count_acked_messages db))
+  timed verbose begin fun () ->
+      Printf.sprintf "Flushing %Ld ACKs" (count_acked_messages db)
+    end
     (fun () ->
        execute db
          sqlc"DELETE FROM ocamlmq_msgs WHERE msg_id IN (SELECT * FROM acked_msgs)";
@@ -89,7 +90,7 @@ let flush_acked_msgs ?(verbose = false) db =
 
 let materialize_pending_acks ?(verbose = false) db =
   timed verbose
-    (fun () -> sprintf "Materializing %Ld pending ACKs in DB"
+    (fun () -> Printf.sprintf "Materializing %Ld pending ACKs in DB"
                  (count_unmaterialized_pending_acks db))
     (fun () ->
        execute db sqlc"UPDATE ocamlmq_msgs SET ack_pending = 1
@@ -108,15 +109,15 @@ let rec flush t =
          unmaterialized_ack_pendings <> 0L || acked_msgs <> 0L
       then begin
         flushed := true;
-(*
-        pr "Flushing to disk: %d msgs, %d + %Ld pending ACKS, %Ld ACKS"
-          in_mem_msgs ack_pending unmaterialized_ack_pendings acked_msgs;
-*)
+        if t.debug then
+          pr "Flushing to disk: %d msgs, %d + %Ld pending ACKS, %Ld ACKS"
+            in_mem_msgs ack_pending unmaterialized_ack_pendings acked_msgs;
         do_flush t db;
       end
   end;
   Option.may Binlog.truncate t.binlog;
-  if !flushed then puts " (%8.5fs)" (Unix.gettimeofday () -. t0)
+  if !flushed then
+    if t.debug then puts " (%8.5fs)" (Unix.gettimeofday () -. t0)
 
 and do_flush t db =
   Hashtbl.iter
@@ -158,10 +159,11 @@ let check_sqlite_version_ok db =
   let to_num s = Scanf.sscanf s "%d" (fun n -> n) in
   let ns = List.map to_num (BatString.nsplit v ~by:".") in
     if ns < [ 3; 6; 8 ] then
-      failwith (sprintf "Need sqlite3 >= 3.6.8 (found: %s)" v)
+      failwith (Printf.sprintf "Need sqlite3 >= 3.6.8 (found: %s)" v)
 
 let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
-         ?binlog ?(sync_binlog = false) ?(ordering = false) file =
+         ?binlog ?(sync_binlog = false) ?(debug = false) ?(ordering = false)
+         file =
   let wait_flush, awaken_flush = Lwt.wait () in
   let mut = Lwt_mutex.create () in
   let t =
@@ -173,6 +175,7 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
       binlog_file = binlog; binlog = None;
       sync_binlog = sync_binlog;
       shutdown_flushers = false;
+      debug;
       ordering = ordering;
       with_lock = (fun f -> Lwt_mutex.with_lock mut f);
     } in
@@ -200,7 +203,8 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
       if not (SSET.is_empty t.unacks) then
         transaction t.db
           (fun db ->
-             puts "UnACKing %d messages in DB" (SSET.cardinal t.unacks);
+             if t.debug then
+               puts "UnACKing %d messages in DB" (SSET.cardinal t.unacks);
              SSET.iter (unack db) t.unacks);
       t.unacks <- SSET.empty;
       loop_flush_unacks ()
@@ -209,12 +213,18 @@ let make ?(max_msgs_in_mem = max_int) ?(flush_period = 1.0)
     check_sqlite_version_ok t.db;
     ignore
       (try_lwt loop_flush wait_flush
-       with e -> puts "EXCEPTION IN FLUSHER: %s" (Printexc.to_string e);
-                 return ());
+       with e ->
+         if t.debug then
+           puts "EXCEPTION IN FLUSHER: %s" (Printexc.to_string e);
+         return ()
+      );
     ignore
       (try_lwt loop_flush_unacks ()
-       with e -> puts "EXCEPTION IN UNACK FLUSHER: %s" (Printexc.to_string e);
-                 return ());
+       with e ->
+         if t.debug then
+           puts "EXCEPTION IN UNACK FLUSHER: %s" (Printexc.to_string e);
+         return ()
+      );
     t
 
 let initialize t =
@@ -472,8 +482,9 @@ let crash_recovery t =
           Binlog.make ~sync:t.sync_binlog f
         in
           t.binlog <- Some binlog;
-          eprintf "(binlog: %d msgs added, %d msgs acked) %!"
-            (List.length added_msgs) (List.length acked_msg_ids);
+          if t.debug then
+            Printf.eprintf "(binlog: %d msgs added, %d msgs acked) %!"
+              (List.length added_msgs) (List.length acked_msg_ids);
           lwt () = Lwt_list.iter_s (do_save_msg ~can_flush:false t false)
             added_msgs in
           List.iter (do_ack_msg ~can_flush:false t) acked_msg_ids;

@@ -58,6 +58,7 @@ let () =
           ~flush_period:!flush_period
           ?binlog:(match !binlog with "" -> None | s -> Some s)
           ~sync_binlog:!sync_binlog
+          ~debug:!debug
           (BatOption.default "ocamlmq.db" !db)
       in
         if !debug then eprintf "Connected to database.\n%!";
@@ -71,5 +72,3 @@ let () =
         SERVER.run_unix_server_loop addr (server, broker);
         Lwt_comm.wait_for_server_shutdown server_ctl
     end
-
-

@@ -591,7 +591,6 @@ let valid_credentials broker frame =
        true
   with Not_found | Exit -> false
 
-
 let do_establish_connection broker c =
   lwt frame = Lwt_comm.recv c in
     match frame.STOMP.fr_command with
@@ -632,19 +631,19 @@ let do_establish_connection broker c =
 
 let establish_connection broker conn =
     try_lwt
-      do_establish_connection broker conn
-    with e ->
-      eprintf "Got toplevel exception: %s\n%!" (Printexc.to_string e);
-      Printexc.print_backtrace stderr;
-      Lwt_unix.sleep 0.01
-    finally
+      lwt () = do_establish_connection broker conn in
       Lwt_comm.close conn;
+      return_unit
+    with exn ->
+      lwt () = Lwt_unix.sleep 0.01 in
+      Lwt_comm.close conn ~exn;
       return_unit
 
 let make_broker
       ~frame_eol ~force_send_async
       ~send_async_max_mem
       ~max_prefetch ~login ~passcode
+      ?(debug = false)
       ~ordering
       msg_store =
   {
@@ -657,7 +656,7 @@ let make_broker
     b_force_async = force_send_async;
     b_async_maxmem = send_async_max_mem;
     b_async_usedmem = 0;
-    b_debug = false;
+    b_debug = debug;
     b_login = login;
     b_passcode = passcode;
     b_max_prefetch = max_prefetch;
@@ -681,19 +680,19 @@ let make_server ?(frame_eol = true) ?(force_send_async = false)
       ~frame_eol ~force_send_async
       ~send_async_max_mem
       ~max_prefetch ~login ~passcode
+      ~debug
       ~ordering
       msg_store
   in
-  let broker = { broker with b_debug = debug } in
   let t0 = Unix.gettimeofday () in
-    eprintf "Performing crash recovery... %!";
+    DEBUG(eprintf "Performing crash recovery... %!");
     lwt () = P.crash_recovery broker.b_msg_store in
-      eprintf "DONE (%8.5fs)\n%!" (Unix.gettimeofday () -. t0);
+      DEBUG(eprintf "DONE (%8.5fs)\n%!" (Unix.gettimeofday () -. t0));
     return
       (Lwt_comm.duplex (establish_connection broker)
          ~on_shutdown: begin fun () ->
            lwt () = P.shutdown broker.b_msg_store in
-           eprintf "ocamlmq server shut down.\n%!";
+           DEBUG(Printf.eprintf "ocamlmq server shut down.\n%!");
            return_unit
          end,
        broker
