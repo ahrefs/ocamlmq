@@ -46,6 +46,13 @@ let get_timestamp =
     last_ts := ts;
     ts
 
+let log_exn exn fmt =
+  Printf.ksprintf begin fun s ->
+      Printf.eprintf "%i: %s: %s\n%!"
+        (Unix.getpid ()) s (Printexc.to_string exn);
+    end
+    fmt
+
 module Make(P : PERSISTENCE) =
 struct
 
@@ -110,7 +117,7 @@ type broker = {
 DEFINE DEBUG(what_to_print) = if broker.b_debug then what_to_print
 let show fmt = eprintf (fmt ^^ "\n%!")
 
-let ignore_result ?(exn_handler = fun _ -> return ()) f x =
+let ignore_result ~exn_handler f x =
   ignore_result (try_lwt f x with e -> exn_handler e)
 
 let is_prefix_topic topic =
@@ -180,6 +187,10 @@ let send_to_topic broker topic msg =
       (fun conn ->
          DEBUG(show "Sending topic msg(%S) to %d" topic conn.conn_id);
          ignore_result (Lwt_comm.send conn.conn) msg
+           ~exn_handler: begin fun exn ->
+             log_exn exn "Sending topic msg(%S) to %d" topic conn.conn_id;
+             return ()
+           end
       )
       (matching_conns broker topic);
     return ()
@@ -261,8 +272,12 @@ let rec send_to_recipient ~kind broker listeners conn subs queue msg =
       end;
       (* try to send older messages for the subscription whose message
        * we just ACKed *)
-      (ignore_result (send_saved_messages broker) queue;
-       return ())
+      ignore_result (send_saved_messages broker) queue
+        ~exn_handler: begin fun exn ->
+          log_exn exn "send_saved_messages to queue %S" queue;
+          return ()
+        end;
+      return_unit
     end
 
 and send_saved_messages ?(only_once = false) broker queue =
@@ -387,7 +402,12 @@ let cmd_subscribe broker conn frame =
                  in H.add broker.b_queues name ls
              end;
              lwt () = ret [] in (* ACK before sending *)
-               ignore_result (send_saved_messages broker) name;
+               ignore_result (send_saved_messages broker) name
+                 ~exn_handler: begin fun exn ->
+                   log_exn exn "cmd_subscribe: send_saved_messages to %S"
+                     name;
+                   return ()
+                 end;
                return ()
         end
       | Control _ -> raise Not_found
@@ -490,8 +510,18 @@ let cmd_send broker conn frame =
                 if broker.b_ordering
                 then begin
                   ignore_result (send_saved_messages broker) queue
+                    ~exn_handler: begin fun exn ->
+                      log_exn exn "cmd_send: send_saved_messages to %S"
+                        queue;
+                      return ()
+                    end
                 end else begin
                   ignore_result (send_to_queue broker queue) msg
+                    ~exn_handler: begin fun exn ->
+                      log_exn exn "cmd_send: send_to_queue %S"
+                        queue;
+                      return ()
+                    end
                 end;
                 return ()
             end else begin
@@ -504,7 +534,11 @@ let cmd_send broker conn frame =
                      finally
                        broker.b_async_usedmem <- broker.b_async_usedmem - len;
                        return ())
-                  msg;
+                  msg
+                  ~exn_handler: begin fun exn ->
+                    log_exn exn "cmd_send: save %S" queue;
+                    return ()
+                  end;
                 return ()
             end
       | Control dst -> handle_control_message broker dst conn frame >>= ret
